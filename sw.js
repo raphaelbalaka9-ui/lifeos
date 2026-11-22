@@ -1,6 +1,6 @@
 /* LifeOS : réseau d'abord (pour toujours avoir la dernière version), copie locale si pas de connexion.
    Cloudflare Pages redirige /index.html vers / : on ne sert jamais une réponse « redirigée » (Safari et Chrome refusent de l'ouvrir). */
-var CACHE = 'lifeos-v7';
+var CACHE = 'lifeos-v9';
 var SHELL = ['./', 'fonts.css', 'runtime.js', 'screens.js', 'i18n-en.js', 'pwa.js', 'vendor/react.js', 'vendor/react-dom.js', 'vendor/supabase.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 function clean(res) {
   if (!res || !res.redirected) return Promise.resolve(res);

@@ -6,7 +6,7 @@
   var R = window.React, RD = window.ReactDOM, h = R.createElement;
   var SCREENS = window.LIFEOS_SCREENS || {};
   var HOLE = /\{\{\s*([^}]+?)\s*\}\}/g;
-  var TRANSIENT = ['switching', 'running', 'tick', 'theme', 'edit', 'msg', 'confirmReset', 'resetting', 'left', 'dur', 'copied', 'proj', 'ciDrag', 'ciFrac', 'ciSw', 'ciFly', 'ciHold', 'ciFx', 'ciBump', 'ciMic', 'ciRankUp', 'sheet', 'pickSel', 'prMsg', 'rdMsg', 'brdBusy', 'brdMsg', 'brdCopied', 'brdCode', 'brdPseudo', 'brdAt', 'plSheet', 'plTick', 'plSel', 'hbMsg', 'newTaskM', 'revOpen', 'revAmt', 'revSrc'];
+  var TRANSIENT = ['switching', 'running', 'tick', 'theme', 'edit', 'msg', 'confirmReset', 'resetting', 'left', 'dur', 'copied', 'proj', 'ciDrag', 'ciFrac', 'ciSw', 'ciFly', 'ciHold', 'ciFx', 'ciBump', 'ciMic', 'ciRankUp', 'sheet', 'pickSel', 'prMsg', 'rdMsg', 'brdBusy', 'brdMsg', 'brdCopied', 'brdCode', 'brdPseudo', 'brdAt', 'plSheet', 'plTick', 'plSel', 'hbMsg', 'newTaskM', 'revOpen', 'revAmt', 'revSrc', 'hitAt', 'hitAmt'];
 
   var store = {
     get: function (k) { try { var v = localStorage.getItem('lifeos:' + k); return v ? JSON.parse(v) : null; } catch (e) { return null; } },
@@ -186,6 +186,7 @@
     } catch (e) { /* on garde l'appli utilisable même si la migration échoue */ }
     store.set('dataVersion', 3); dv = 3;
   }
+  var BOOT_HAS_DATA = (function () { try { return Object.keys(localStorage).some(function (k) { return /^lifeos:state:/.test(k) || k === 'lifeos:shared:checkins' || k === 'lifeos:shared:revenus'; }); } catch (e) { return false; } })();
   /* Nettoyage : plus aucune trace des anciens projets perso (Copyfy, prospection, agents), une seule fois */
   (function () {
     try {
@@ -874,6 +875,46 @@
   /* ---------- Réglages et sauvegarde, utilisés par la page Paramètres ---------- */
   window.LifeOS = {
     settings: SETTINGS,
+    share: function (d) { try { window.dispatchEvent(new CustomEvent('lifeos-share', { detail: d || {} })); } catch (e) {} },
+    /* Rappel du soir sans serveur : un événement d'agenda qui se répète chaque jour (iPhone/PC : fichier .ics ; Android : Google Agenda) */
+    reminder: (function () {
+      function pad(n) { return ('0' + n).slice(-2); }
+      function appUrl() { try { return /^https?:/.test(location.protocol) ? location.origin + location.pathname : ''; } catch (e) { return ''; } }
+      function startOf(hour) { var d = new Date(); return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + 'T' + pad(hour) + '0000'; }
+      var TITLE = '⚔️ Check-in LifeOS XP (2 min)', DESC = 'Note ton argent du jour, coche ta kill list et frappe ton Boss. +300 XP.';
+      function fold(l) { var a = Array.from(l), out = [], i = 0; while (i < a.length) { var n = i === 0 ? 70 : 69; out.push((i ? ' ' : '') + a.slice(i, i + n).join('')); i += n; } return out.join('\r\n'); }
+      function ics(hour) {
+        hour = Math.max(0, Math.min(23, Number(hour) || 21));
+        var now = new Date(), stamp = now.getUTCFullYear() + pad(now.getUTCMonth() + 1) + pad(now.getUTCDate()) + 'T' + pad(now.getUTCHours()) + pad(now.getUTCMinutes()) + '00Z';
+        var u = appUrl();
+        return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//LifeOS XP//Rappel//FR', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+          'BEGIN:VEVENT', 'UID:lifeosxp-checkin-' + now.getTime() + '@lifeosxp', 'DTSTAMP:' + stamp, 'DTSTART:' + startOf(hour), 'DURATION:PT10M', 'RRULE:FREQ=DAILY',
+          'SUMMARY:' + TITLE, 'DESCRIPTION:' + DESC + (u ? '\\n' + u : '')].concat(u ? ['URL:' + u] : []).concat([
+          'BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:' + TITLE, 'TRIGGER:PT0M', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR']).map(fold).join('\r\n') + '\r\n';
+      }
+      function google(hour) {
+        hour = Math.max(0, Math.min(23, Number(hour) || 21));
+        var st = startOf(hour), en = st.slice(0, 9) + pad(hour) + '1000', u = appUrl();
+        return 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=' + encodeURIComponent(TITLE) + '&dates=' + st + '/' + en +
+          '&recur=' + encodeURIComponent('RRULE:FREQ=DAILY') + '&details=' + encodeURIComponent(DESC + (u ? '\n' + u : ''));
+      }
+      function kind() { var ua = navigator.userAgent || ''; return /android/i.test(ua) ? 'google' : 'ics'; }
+      function add(hour) {
+        hour = Number(hour) || (store.get('profile') || {}).ciHour || 21;
+        var k = kind();
+        try {
+          if (k === 'google') { window.open(google(hour), '_blank', 'noopener'); }
+          else {
+            var url = URL.createObjectURL(new Blob([ics(hour)], { type: 'text/calendar;charset=utf-8' })), a = document.createElement('a');
+            a.href = url; if (/iPhone|iPad|iPod/i.test(navigator.userAgent || '')) { a.target = '_blank'; a.rel = 'noopener'; } else a.download = 'rappel-lifeos-xp.ics';
+            document.body.appendChild(a); a.click(); setTimeout(function () { a.remove(); URL.revokeObjectURL(url); }, 4000);
+          }
+          store.set('reminder', { hour: hour, at: isoDay(new Date()), kind: k });
+        } catch (e) {}
+        return k;
+      }
+      return { ics: ics, google: google, add: add, kind: kind, get: function () { return store.get('reminder'); } };
+    })(),
     set: function (patch) { Object.assign(SETTINGS, patch || {}); store.set('settings', SETTINGS); try { document.documentElement.lang = SETTINGS.lang; } catch (e) {} bump(); },
     themeMode: function () { return store.get('theme') || 'auto'; },
     setTheme: function () {},
@@ -900,12 +941,40 @@
           list.forEach(function (b, i) { if (!killed[i] && (b.kind === 'total' ? total : months[mk]) >= b.target) killed[i] = d; });
         });
         /* dans l'ordre : on ne bat pas le boss 4 avant le 3 */
+        var start = Math.max(0, Math.min(list.length - 1, Number(store.get('bossStart')) || 0));
+        for (var s0 = 0; s0 < start; s0++) killed[s0] = 'avant';
         for (var i = 1; i < list.length; i++) if (killed[i] && !killed[i - 1]) { for (var j = i; j < list.length; j++) killed[j] = null; break; }
         var cur = killed.indexOf(null), mkNow = isoDay(new Date()).slice(0, 7), bestMonth = 0;
         Object.keys(months).forEach(function (k) { bestMonth = Math.max(bestMonth, months[k]); });
         var B = cur >= 0 ? list[cur] : null, have = B ? (B.kind === 'total' ? total : (months[mkNow] || 0)) : 0;
         return { list: list.map(function (b, i) { return Object.assign({}, b, { i: i, killed: killed[i] }); }), cur: cur, boss: B, have: have, total: total, thisMonth: months[mkNow] || 0, bestMonth: bestMonth,
           hp: B ? Math.max(0, B.target - have) : 0, hpPct: B ? Math.max(0, Math.round((B.target - Math.min(have, B.target)) / B.target * 100)) : 0 };
+      }
+      /* Boss 0 « Le Démarrage » : pour ceux qui n'ont pas encore gagné leur 1er euro. 4 étapes à cocher + la 1re vente. */
+      var LAUNCH = {
+        'Revente': ['Choisir ma plateforme (Vinted, Leboncoin…)', 'Trouver mes 3 premiers articles', 'Prendre de belles photos', 'Publier mes 3 premières annonces'],
+        'Freelance': ['Choisir mon service et mon prix', 'Préparer 2 exemples de mon travail', 'Contacter 10 clients potentiels', 'Publier mon offre'],
+        'Contenu': ['Choisir ma niche', 'Créer mon compte pro', 'Publier mes 3 premières vidéos', 'Choisir comment je vais gagner de l\'argent'],
+        'Vente': ['Choisir mon produit', 'Calculer mon prix et ma marge', 'Créer ma boutique ou ma page', 'Publier mon premier post produit'],
+        'Fait': ['Choisir mes 2 produits phares', 'Fixer mes prix', 'Prendre des photos de mes créations', 'Annoncer sur WhatsApp ou Insta'],
+        'Coaching': ['Définir mon offre', 'Fixer mon prix', 'Lister 3 premiers clients ou élèves possibles', 'Publier mon offre'],
+        'def': ['Choisir ce que je vends, en une phrase', 'Fixer mon prix', 'En parler à 5 personnes de ma cible', 'Publier ma première offre (post, annonce, story)']
+      };
+      function bizKey(b) { b = String(b || ''); var k = Object.keys(LAUNCH).filter(function (x) { return x !== 'def' && b.indexOf(x) === 0; })[0]; return k || 'def'; }
+      function launch(revIn) {
+        var L = store.get('launch');
+        if (!L) return { on: false, has: false, killed: false, nDone: 0, steps: [] };
+        var prof = store.get('profile') || {}, done = L.done || {};
+        var total = (revIn || store.get('shared:revenus') || []).reduce(function (a, r) { return a + (Number(r.m) || 0); }, 0);
+        var names = LAUNCH[bizKey(prof.biz)].concat(['Encaisser mon premier euro']);
+        var steps = names.map(function (n, i) { return { i: i, name: n, auto: i === 4, done: i === 4 ? total > 0 : !!done[i] }; });
+        var nDone = steps.filter(function (x) { return x.done; }).length, killed = total > 0;
+        return { on: !killed, has: true, killed: killed, nDone: nDone, manualDone: steps.filter(function (x) { return x.done && !x.auto; }).length, steps: steps, hpPct: Math.round((5 - nDone) / 5 * 100), xp: 5000 };
+      }
+      function toggleLaunch(i) {
+        var L = store.get('launch'); if (!L || i < 0 || i > 3) return;
+        L.done = L.done || {}; if (L.done[i]) delete L.done[i]; else L.done[i] = isoDay(new Date());
+        store.set('launch', L);
       }
       function streakAt(C, d) { var x = new Date(d + 'T12:00:00'), n = 0; while (C[isoDay(x)]) { n++; x.setDate(x.getDate() - 1); } return n; }
       function summary() {
@@ -915,20 +984,24 @@
         (SP.sets || []).forEach(function (x) { if (x.d) (days[x.d] = days[x.d] || {}).se = 1; });
         H.forEach(function (h) { Object.keys(h.log || {}).forEach(function (d) { if (h.log[d] === 1) { var o = (days[d] = days[d] || {}); o.h = (o.h || 0) + 1; } }); });
         Object.keys(F).forEach(function (d) { var m = Number((F[d] || {}).m) || 0; if (m >= 25) (days[d] = days[d] || {}).f = Math.min(4, Math.floor(m / 25)); });
+        var MN = store.get('state:Main') || {}, KL = Object.assign({}, MN.killLog || {});
         var tdy = isoDay(new Date()), total = 0, today = 0, week = 0, nH = H.length, wk0 = weekKey(new Date());
+        var kT = (MN.prios || []).filter(function (p) { return p.done && (p.day || tdy) === tdy; }).length; KL[tdy] = Math.max(Number(KL[tdy]) || 0, kT);
+        Object.keys(KL).forEach(function (d) { if (Number(KL[d]) > 0) (days[d] = days[d] || {}).k = Math.min(3, Number(KL[d])); });
         Object.keys(days).forEach(function (d) {
-          var o = days[d], base = (o.ci ? 300 : 0) + (o.se ? 500 : 0) + Math.min(3, o.h || 0) * 150 + (nH && (o.h || 0) >= nH ? 300 : 0) + (o.f || 0) * 200;
+          var o = days[d], base = (o.ci ? 300 : 0) + (o.se ? 500 : 0) + Math.min(3, o.h || 0) * 150 + (nH && (o.h || 0) >= nH ? 300 : 0) + (o.f || 0) * 200 + (o.k || 0) * 100;
           var st = o.ci ? streakAt(C, d) : 0, mult = 1 + Math.min(0.5, 0.1 * Math.floor(st / 7)), v = Math.round(base * mult);
           total += v; if (d === tdy) today = v; if (d >= wk0) week += v;
         });
-        var B = bosses(), bossXP = 0; B.list.forEach(function (b) { if (b.killed) bossXP += Number(b.xp) || 0; });
+        var B = bosses(), bossXP = 0; B.list.forEach(function (b) { if (b.killed && b.killed !== 'avant') bossXP += Number(b.xp) || 0; });
         var ri = SP.rankInfo && SP.rankInfo.v === 2 ? SP.rankInfo : null, spR = ri ? Math.max(0, Math.min(9, ri.r || 0)) : 0, sportXP = 0;
         for (var r = 1; r <= spR; r++) sportXP += SPORT_XP[r];
         var goalsDone = (OB.goals || []).filter(function (g) { return Number(g.pct) >= 100; }).length, goalXP = goalsDone * 10000;
-        total += bossXP + sportXP + goalXP;
+        var LN = launch(), launchXP = LN.has ? LN.manualDone * 200 + (LN.killed ? 5000 : 0) : 0;
+        total += bossXP + sportXP + goalXP + launchXP;
         var L = levelOf(total), stNow = streakAt(C, C[tdy] ? tdy : isoDay(new Date(Date.now() - 864e5)));
         return { total: total, today: today, week: week, weekKey: wk0, level: L.level, into: L.into, need: L.need, pct: L.need ? Math.round(L.into / L.need * 100) : 100,
-          streak: stNow, mult: 1 + Math.min(0.5, 0.1 * Math.floor(stNow / 7)), bossXP: bossXP, sportXP: sportXP, goalXP: goalXP, bosses: B };
+          streak: stNow, mult: 1 + Math.min(0.5, 0.1 * Math.floor(stNow / 7)), bossXP: bossXP, sportXP: sportXP, goalXP: goalXP, launchXP: launchXP, launch: LN, bosses: B };
       }
       function fmt(n) { return Math.round(Number(n) || 0).toLocaleString('fr-FR'); }
       /* Rivaux 🤖 : clairement indiqués comme des bots, ils progressent chaque jour à un rythme réaliste */
@@ -941,7 +1014,7 @@
           return { bot: true, user_id: 'bot' + i, pseudo: b[0], xp_total: total, xp_week: wk, level: levelOf(total).level, sport_rank: Math.min(6, 1 + (i % 5)), streak: 3 + (i * 5) % 40 };
         });
       }
-      return { summary: summary, bosses: bosses, levelOf: levelOf, fmt: fmt, rivals: rivals, BOSS: BOSS, SPORT_XP: SPORT_XP };
+      return { summary: summary, bosses: bosses, launch: launch, toggleLaunch: toggleLaunch, bizKey: bizKey, levelOf: levelOf, fmt: fmt, rivals: rivals, BOSS: BOSS, SPORT_XP: SPORT_XP };
     })(),
     /* Rangs du sport : 5 rangs à 3 niveaux, puis Champion et Légende, avec leur emblème */
     sport: (function () {
@@ -1030,10 +1103,10 @@
     resetAll: function (cb) {
       frozen = true;
       /* on garde seulement les réglages d'affichage et les marqueurs de mise à jour (sinon d'anciennes données reviendraient) */
-      var KEEP = { 'lifeos:theme': 1, 'lifeos:dataVersion': 1, 'lifeos:onboarded': 1, 'lifeos:planV8': 1, 'lifeos:cleanV9': 1, 'lifeos:sync': 1 };
+      var KEEP = { 'lifeos:theme': 1, 'lifeos:dataVersion': 1, 'lifeos:planV8': 1, 'lifeos:cleanV9': 1, 'lifeos:sync': 1 };
       store.keys().forEach(function (k) { if (!KEEP[k] && k !== 'lifeos:settings') localStorage.removeItem(k); });
       try { var S = JSON.parse(localStorage.getItem('lifeos:settings') || '{}') || {}; localStorage.setItem('lifeos:settings', JSON.stringify({ lang: S.lang || 'fr', currency: S.currency || '€', name: '' })); } catch (e) {}
-      try { localStorage.setItem('lifeos:shared:habits', '[]'); localStorage.setItem('lifeos:state:Main', JSON.stringify({ week: [] })); } catch (e) {}
+      try { localStorage.setItem('lifeos:shared:habits', '[]'); } catch (e) {}
       var done = function () { window.location.reload(); };
       /* connecté : on efface aussi la sauvegarde en ligne, sinon elle remettrait tout au rechargement */
       var w = Cloud.wipe(); if (cb) cb(!!w);
@@ -1076,6 +1149,10 @@
       '.lifeos-seg>button[aria-pressed="true"]{background:transparent!important;border-color:transparent!important}',
       '.lifeos-tabbar{display:none}',
       '.lifeos-mobile-only{display:none!important}.lifeos-hide{display:none!important}',
+      '.lifeos-press{transition:transform 160ms cubic-bezier(0.23,1,0.32,1)}.lifeos-press:active{transform:scale(0.97)}',
+      '@keyframes lifeos-hit{0%{opacity:0;transform:translateY(6px) scale(.96)}20%{opacity:1;transform:none}100%{opacity:0;transform:translateY(-26px)}}@keyframes lifeos-shake{0%,100%{transform:none}25%{transform:translateX(-4px)}55%{transform:translateX(3px)}80%{transform:translateX(-1px)}}',
+      '.lifeos-dmg{animation:lifeos-hit 900ms cubic-bezier(0.23,1,0.32,1) forwards}.lifeos-shake{animation:lifeos-shake 320ms cubic-bezier(0.23,1,0.32,1)}.lifeos-hp{transition:width 600ms cubic-bezier(0.23,1,0.32,1)}',
+      '@media (prefers-reduced-motion: reduce){.lifeos-press,.lifeos-hp{transition:none}.lifeos-dmg{animation:none;opacity:0}.lifeos-shake{animation:none}}',
       'aside a[href^="Developpement"]{display:none!important}',
       '@media (max-width:760px){' + [
         '.lifeos-tabbar{display:flex}div.lifeos-tabbar{display:block}',
@@ -1143,6 +1220,7 @@
     Main: 'M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z',
     CheckIn: 'M13 2L4 14h7l-1 8 9-12h-7z',
     Planning: 'M4 5h16v15H4zM4 10h16M9 3v4M15 3v4',
+    Objectifs: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
     Sport: 'M6.5 6.5v11M17.5 6.5v11M3 9.5v5M21 9.5v5M6.5 12h11',
     Productivity: 'M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 9v4l2.5 2M9 2h6',
     Plus: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z'
@@ -1153,7 +1231,7 @@
     var dark = p.theme === 'sombre';
     var C = dark ? { bg: 'rgba(27,27,30,.94)', ink: '#f2f2f3', mut: '#9a9ca2', line: 'rgba(255,255,255,.08)', sheet: '#151517', on: 'rgba(255,255,255,.08)', act: '#f2f2f3', actInk: '#0b0b0c', card: 'rgba(255,255,255,.05)' }
                  : { bg: 'rgba(255,255,255,.96)', ink: '#0d0e10', mut: '#45474c', line: 'rgba(13,14,16,.08)', sheet: '#ffffff', on: 'rgba(13,14,16,.06)', act: '#0d0e10', actInk: '#ffffff', card: '#f3f4f6' };
-    var MORE = [['Objectifs', 'Objectifs', 'Buts et Boss', 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 12h.01'], ['Habitudes', 'Habitudes', 'Flames et séries', 'M12.6 2.2c.4 2.6 1.8 4.2 3.3 5.9 1.4 1.6 2.6 3.3 2.6 5.9A6.5 6.5 0 0 1 12 20.5 6.5 6.5 0 0 1 5.5 14c0-2.4 1.1-4.1 2.6-5.3-.1 1.6.4 2.9 1.6 3.6-.2-3.7 1.2-7.3 2.9-10.1z'], ['Classement', 'Classement', 'Amis et monde', 'M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3'], ['Parametres', 'Paramètres', 'Langue, thème, données', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a7.9 7.9 0 0 0 0-6M4.6 9a7.9 7.9 0 0 0 0 6']];
+    var MORE = [['Sport', 'Sport', 'Séances et rangs', 'M6.5 6.5v11M17.5 6.5v11M3 9.5v5M21 9.5v5M6.5 12h11'], ['Habitudes', 'Habitudes', 'Flames et séries', 'M12.6 2.2c.4 2.6 1.8 4.2 3.3 5.9 1.4 1.6 2.6 3.3 2.6 5.9A6.5 6.5 0 0 1 12 20.5 6.5 6.5 0 0 1 5.5 14c0-2.4 1.1-4.1 2.6-5.3-.1 1.6.4 2.9 1.6 3.6-.2-3.7 1.2-7.3 2.9-10.1z'], ['Classement', 'Classement', 'Amis et monde', 'M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3'], ['Parametres', 'Paramètres', 'Langue, thème, données', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a7.9 7.9 0 0 0 0-6M4.6 9a7.9 7.9 0 0 0 0 6']];
     var inMore = MORE.some(function (m) { return m[0] === p.screen; });
     function icon(d) { return h('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' }, h('path', { d: d })); }
     function tab(name, label, key) {
@@ -1177,15 +1255,188 @@
           }))) : null,
       h('div', { className: 'lifeos-tabbar', 'data-lifeos-logo': '1', role: 'button', tabIndex: 0, title: out('Rafraîchir LifeOS'), 'aria-label': out('Rafraîchir LifeOS'), style: { position: 'absolute', top: 'calc(14px + env(safe-area-inset-top))', right: 16, zIndex: 30, width: 44, height: 44, borderRadius: 14, background: C.ink, color: dark ? '#0b0b0c' : '#ffffff', placeItems: 'center', cursor: 'pointer', boxShadow: '0 6px 18px rgba(0,0,0,.25)', fontFamily: "'Urbanist', 'Manrope', system-ui, sans-serif", fontWeight: 700, fontSize: 21, userSelect: 'none' } }, h('span', null, 'L')),
       h('nav', { className: 'lifeos-tabbar', 'aria-label': out('Navigation'), style: { position: 'fixed', left: 14, right: 14, bottom: 'calc(14px + env(safe-area-inset-bottom))', zIndex: 60, padding: 7, alignItems: 'center', justifyContent: 'space-between', borderRadius: 999, background: C.bg, boxShadow: '0 14px 34px rgba(13,14,16,.18)', border: '1px solid ' + C.line, backdropFilter: 'blur(18px)', WebkitBackdropFilter: 'blur(18px)', fontFamily: "'Manrope', system-ui, sans-serif" } },
-        tab('Main', 'Accueil'), tab('Planning', 'Planning'), tab('Sport', 'Sport'), tab('Productivity', 'Focus'), tab(null, 'Plus', 'Plus')));
+        tab('Main', 'Accueil'), tab('Planning', 'Planning'), tab('Productivity', 'Focus'), tab('Objectifs', 'Objectifs'), tab(null, 'Plus', 'Plus')));
   }
 
   /* ---------- Application ---------- */
+  /* ---------- Cartes à partager (story 1080×1920, noir et blanc) ---------- */
+  function shareCard(o) {
+    var W = 1080, H = 1920, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    var c = cv.getContext('2d');
+    var ready = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
+    return ready.then(function () {
+      var UR = "'Urbanist', 'Manrope', system-ui, sans-serif", MA = "'Manrope', system-ui, sans-serif";
+      c.fillStyle = '#0b0b0c'; c.fillRect(0, 0, W, H);
+      var g = c.createRadialGradient(W * 0.8, H * 0.12, 40, W * 0.8, H * 0.12, 900); g.addColorStop(0, 'rgba(255,255,255,0.10)'); g.addColorStop(1, 'rgba(255,255,255,0)'); c.fillStyle = g; c.fillRect(0, 0, W, H);
+      function rr(x, y, w, hh, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + hh, r); c.arcTo(x + w, y + hh, x, y + hh, r); c.arcTo(x, y + hh, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+      function fit(txt, font, size, maxW) { var sz = size; do { c.font = font.replace('{s}', sz); sz -= 4; } while (c.measureText(txt).width > maxW && sz > 40); return sz + 4; }
+      /* logo */
+      rr(90, 120, 96, 96, 26); c.fillStyle = '#f4f4f5'; c.fill();
+      c.fillStyle = '#0b0b0c'; c.font = '800 58px ' + UR; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('L', 138, 170);
+      c.textAlign = 'left'; c.fillStyle = '#f4f4f5'; c.font = '800 46px ' + UR; c.fillText('LifeOS XP', 214, 170);
+      /* kicker */
+      c.textBaseline = 'alphabetic'; c.fillStyle = '#a2a5aa'; c.font = '800 40px ' + MA; c.fillText(String(o.kicker || '').toUpperCase(), 90, 520);
+      /* titre */
+      c.fillStyle = '#f4f4f5'; fit(o.title || '', '800 {s}px ' + UR, 132, W - 180); c.fillText(o.title || '', 90, 680);
+      if (o.sub) { c.fillStyle = '#a2a5aa'; c.font = '600 46px ' + MA; c.fillText(o.sub, 90, 760); }
+      /* grand chiffre */
+      if (o.big) { c.fillStyle = '#f4f4f5'; fit(o.big, '800 {s}px ' + UR, 360, W - 180); c.fillText(o.big, 80, 1180); }
+      if (o.bigSub) { c.fillStyle = '#a2a5aa'; c.font = '700 48px ' + MA; c.fillText(o.bigSub, 90, 1260); }
+      /* barre */
+      if (o.bar != null) { rr(90, 1320, W - 180, 34, 17); c.fillStyle = 'rgba(255,255,255,0.12)'; c.fill(); var bw = Math.max(34, (W - 180) * Math.max(0, Math.min(1, o.bar))); rr(90, 1320, bw, 34, 17); c.fillStyle = '#f4f4f5'; c.fill(); }
+      /* stats */
+      var st = o.stats || [], cw = (W - 180 - 40 * (st.length - 1)) / Math.max(1, st.length);
+      st.forEach(function (x, i) {
+        var x0 = 90 + i * (cw + 40); rr(x0, 1460, cw, 200, 40); c.fillStyle = 'rgba(255,255,255,0.07)'; c.fill();
+        c.fillStyle = '#a2a5aa'; c.font = '700 34px ' + MA; c.fillText(x[0], x0 + 34, 1530);
+        c.fillStyle = '#f4f4f5'; fit(String(x[1]), '800 {s}px ' + UR, 70, cw - 68); c.fillText(String(x[1]), x0 + 34, 1620);
+      });
+      c.fillStyle = '#6b6e75'; c.font = '700 36px ' + MA; c.fillText(o.foot || 'Transforme ton business en jeu · LifeOS XP', 90, 1800);
+      return new Promise(function (res) { cv.toBlob(function (b) { res(b); }, 'image/png'); });
+    });
+  }
+  function ShareSheet() {
+    var s1 = R.useState(null), cur = s1[0], setCur = s1[1];
+    var u1 = R.useState(''), url = u1[0], setUrl = u1[1];
+    var m1 = R.useState(''), msg = m1[0], setMsg = m1[1];
+    var blobRef = R.useRef(null);
+    R.useEffect(function () {
+      function on(e) { setCur(e.detail || {}); setMsg(''); setUrl(''); blobRef.current = null; shareCard(e.detail || {}).then(function (b) { blobRef.current = b; setUrl(URL.createObjectURL(b)); }); }
+      window.addEventListener('lifeos-share', on);
+      return function () { window.removeEventListener('lifeos-share', on); };
+    }, []);
+    if (!cur) return null;
+    var dark = isDark(), name = 'lifeos-xp-' + (cur.kind || 'carte') + '.png';
+    var close = function () { setCur(null); if (url) URL.revokeObjectURL(url); };
+    var share = function () {
+      var b = blobRef.current; if (!b) return;
+      var f = null; try { f = new File([b], name, { type: 'image/png' }); } catch (e) {}
+      if (f && navigator.canShare && navigator.canShare({ files: [f] })) { navigator.share({ files: [f], text: cur.text || '' }).catch(function () {}); }
+      else { var a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setMsg(out('Image enregistrée. Publie-la en story !')); }
+    };
+    var btn = { border: 0, borderRadius: 999, minHeight: 52, padding: '0 22px', font: 'inherit', fontSize: 15, fontWeight: 800, cursor: 'pointer' };
+    return h('div', { role: 'dialog', 'aria-modal': 'true', 'aria-label': out('Partager'), onClick: close, style: { position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 20, animation: 'lifeos-fade .2s ease', fontFamily: "'Manrope', system-ui, sans-serif" } },
+      h('div', { onClick: function (e) { e.stopPropagation(); }, style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, animation: 'lifeos-sheet .28s cubic-bezier(.23,1,.32,1)' } },
+        url ? h('img', { src: url, alt: out('Carte à partager'), style: { width: 'min(62vw, 300px)', aspectRatio: '9 / 16', borderRadius: 22, boxShadow: '0 24px 60px rgba(0,0,0,.5)' } }) : h('div', { style: { width: 'min(62vw, 300px)', aspectRatio: '9 / 16', borderRadius: 22, background: '#151517' } }),
+        h('div', { style: { display: 'flex', gap: 10 } },
+          h('button', { type: 'button', onClick: share, className: 'lifeos-press', style: Object.assign({}, btn, { background: '#f4f4f5', color: '#0b0b0c' }) }, out('Partager')),
+          h('button', { type: 'button', onClick: close, className: 'lifeos-press', style: Object.assign({}, btn, { background: 'rgba(255,255,255,.12)', color: '#f4f4f5' }) }, out('Fermer'))),
+        msg ? h('span', { role: 'status', style: { color: '#f4f4f5', fontSize: 13, fontWeight: 700 } }, msg) : null));
+  }
+
+  /* ---------- Onboarding (premier lancement) ---------- */
+  function needsOnboarding() {
+    if (store.get('onboarded')) return false;
+    try {
+      if (BOOT_HAS_DATA) { store.set('onboarded', true); return false; }
+    } catch (e) {}
+    return !/[?&]skipOnboarding/.test(location.search);
+  }
+  function Onboarding(p) {
+    var st1 = R.useState(0), step = st1[0], setStep = st1[1];
+    var a1 = R.useState({ name: '', biz: '', rev: -1, tasks: [], hour: 21, task: '' }), A = a1[0], setA = a1[1];
+    var dark = p.theme === 'sombre';
+    var C = dark ? { bg: '#0b0b0c', card: '#151517', ink: '#f2f2f3', mut: '#8e9096', soft: 'rgba(255,255,255,.07)', line: 'rgba(255,255,255,.1)', strong: '#f2f2f3', strongInk: '#0b0b0c' }
+                 : { bg: '#edeef0', card: '#ffffff', ink: '#0d0e10', mut: '#5c6067', soft: '#f3f4f6', line: 'rgba(13,14,16,.1)', strong: '#0d0e10', strongInk: '#ffffff' };
+    var BOSS = (window.LifeOS && window.LifeOS.xp) ? window.LifeOS.xp.BOSS : [];
+    var REV = [['0 €', 0], ['Moins de 100 €', 0], ['100 à 500 €', 1], ['500 à 1 000 €', 2], ['1 000 à 2 000 €', 3], ['2 000 à 5 000 €', 4], ['Plus de 5 000 €', 5]];
+    var BIZ = ['Revente (Vinted…)', 'Vente / e-commerce', 'Fait maison (food, créations)', 'Freelance / services', 'Coaching / cours', 'Contenu / réseaux', 'Autre', 'Pas encore lancé'];
+    var SUG = {
+      'Revente': ['Publier 2 annonces', 'Répondre aux messages des acheteurs', 'Trouver 3 articles à revendre'],
+      'Vente': ['Publier 1 post produit', 'Répondre aux messages clients', 'Améliorer 1 fiche produit'],
+      'Fait': ['Annoncer les commandes de la semaine', 'Noter les commandes à livrer', 'Poster 1 photo d\'une création'],
+      'Freelance': ['Envoyer 10 messages de prospection', 'Relancer 2 anciens clients', 'Mettre à jour mon portfolio'],
+      'Coaching': ['Contacter 3 clients ou élèves potentiels', 'Préparer ma prochaine séance', 'Poster 1 conseil gratuit'],
+      'Contenu': ['Publier 1 vidéo', 'Écrire 3 idées de vidéos', 'Répondre aux commentaires'],
+      'Autre': ['Avancer 1 h sur mon projet', 'Contacter 3 personnes', 'Noter 1 idée à tester'],
+      'Pas': ['Choisir mon idée de business', 'Parler à 3 clients potentiels', 'Lister ce que je sais vendre']
+    };
+    var sugFor = function (b) { b = String(b || ''); var k = Object.keys(SUG).filter(function (x) { return b.indexOf(x) === 0; })[0]; return SUG[k || 'Autre']; };
+    var start = A.rev >= 0 ? REV[A.rev][1] : 0, isLaunch = A.rev === 0 || A.biz === 'Pas encore lancé';
+    var firstBoss = isLaunch ? ['Le Démarrage', 5, 'launch', 5000] : (BOSS[start] || BOSS[0] || ['Le Gardien des 100 €', 100, 'total', 10000]);
+    var bossSub = function (b) { return b[2] === 'launch' ? out('Boss 0 · 5 étapes pour lancer ton business') : b[2] === 'total' ? b[1] + ' € gagnés au total' : b[1].toLocaleString('fr-FR') + ' € en un mois'; };
+    var N = 7, set = function (patch) { setA(function (x) { return Object.assign({}, x, patch); }); };
+    var next = function () { setStep(function (s0) { return Math.min(N - 1, s0 + 1); }); }, back = function () { setStep(function (s0) { return Math.max(0, s0 - 1); }); };
+    function finish() {
+      var nm = String(A.name || '').trim().slice(0, 30);
+      if (nm && window.LifeOS) window.LifeOS.set({ name: nm });
+      store.set('profile', { biz: A.biz, rev: A.rev >= 0 ? REV[A.rev][0] : '', ciHour: A.hour, at: isoDay(new Date()) });
+      store.set('bossStart', start);
+      if (A.rev === 0 || A.biz === 'Pas encore lancé') store.set('launch', { at: isoDay(new Date()), done: {} });
+      var tdy = isoDay(new Date()), M = store.get('state:Main') || {};
+      M.prios = A.tasks.slice(0, 3).map(function (t, i) { return { id: Date.now() + i, t: t, tag: 'copyfy', done: false, day: tdy }; });
+      if (!M.week) M.week = [{ d: [1, 2, 3, 4, 5, 6, 7], s: ('0' + A.hour).slice(-2) + ':00', e: ('0' + A.hour).slice(-2) + ':15', k: 'revue', l: 'Check-in du soir', c: '✓' }];
+      store.set('state:Main', M);
+      store.set('onboarded', true);
+      p.onDone();
+    }
+    var btn = { border: 0, borderRadius: 999, minHeight: 56, padding: '0 24px', font: 'inherit', fontSize: 16, fontWeight: 800, cursor: 'pointer' };
+    var primary = function (label, on, dis) { return h('button', { type: 'button', className: 'lifeos-press', disabled: !!dis, onClick: on, style: Object.assign({}, btn, { flex: 1, background: C.strong, color: C.strongInk, opacity: dis ? 0.35 : 1 }) }, out(label)); };
+    var chip = function (label, on, click, key) { return h('button', { key: key || label, type: 'button', className: 'lifeos-press', 'aria-pressed': on ? 'true' : 'false', onClick: click, style: { border: 0, borderRadius: 16, padding: '14px 16px', minHeight: 52, textAlign: 'left', font: 'inherit', fontSize: 15, fontWeight: 700, cursor: 'pointer', background: on ? C.strong : C.card, color: on ? C.strongInk : C.ink, transition: 'background-color 160ms ease, color 160ms ease' } }, out(label)); };
+    var q = function (kicker, title, sub) { return [h('span', { key: 'k', style: { fontSize: 12, fontWeight: 800, letterSpacing: '.08em', textTransform: 'uppercase', color: C.mut } }, out(kicker)), h('h1', { key: 't', style: { margin: 0, fontFamily: "'Urbanist', 'Manrope', system-ui, sans-serif", fontSize: 32, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.1 } }, out(title)), sub ? h('p', { key: 's', style: { margin: 0, fontSize: 15, fontWeight: 600, color: C.mut, lineHeight: 1.45 } }, out(sub)) : null]; };
+    var inp = { boxSizing: 'border-box', width: '100%', border: '1px solid ' + C.line, background: C.card, color: C.ink, borderRadius: 16, padding: '14px 16px', font: 'inherit', fontSize: 17, minHeight: 56 };
+    var body, cta;
+    if (step === 0) {
+      body = [h('div', { key: 'l', 'aria-hidden': 'true', style: { width: 72, height: 72, borderRadius: 22, background: C.strong, color: C.strongInk, display: 'grid', placeItems: 'center', fontFamily: "'Urbanist', sans-serif", fontWeight: 800, fontSize: 36 } }, 'L')]
+        .concat(q('LifeOS XP', 'Transforme ton business en jeu.', 'Pour les étudiants qui lancent leur business sans sacrifier leurs études. Gratuit pendant la bêta, sans carte bancaire.'))
+        .concat([h('div', { key: 'v', style: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 } }, [['⚔️', 'Bats des Boss en gagnant de l\'argent', 'Même avant ton premier euro : le Boss 0 t\'aide à te lancer, étape par étape.'], ['🎯', 'Ta kill list du jour', '3 actions qui font avancer ton business. Pas plus.'], ['⬆️', '100 niveaux', 'Chaque check-in, chaque euro, chaque tâche te fait monter.']].map(function (v, i) {
+          return h('div', { key: i, style: { display: 'flex', gap: 14, alignItems: 'flex-start', padding: 14, borderRadius: 18, background: C.card, animation: 'lifeos-sheet .4s cubic-bezier(.23,1,.32,1) both', animationDelay: (0.06 * i + 0.05) + 's' } }, h('span', { 'aria-hidden': 'true', style: { fontSize: 24 } }, v[0]), h('span', { style: { display: 'flex', flexDirection: 'column', gap: 2 } }, h('b', { style: { fontSize: 15, fontWeight: 800 } }, out(v[1])), h('span', { style: { fontSize: 13, fontWeight: 600, color: C.mut } }, out(v[2]))));
+        }))]);
+      cta = primary('Commencer', next);
+    } else if (step === 1) {
+      body = q('1 / 5', 'Comment tu t\'appelles ?', 'Juste ton prénom ou un pseudo.').concat([h('input', { key: 'i', type: 'text', value: A.name, autoFocus: true, maxLength: 30, placeholder: out('Ton prénom'), 'aria-label': out('Ton prénom'), onChange: function (e) { set({ name: e.target.value }); }, onKeyDown: function (e) { if (e.key === 'Enter' && A.name.trim()) next(); }, style: inp })]);
+      cta = primary('Continuer', next, !A.name.trim());
+    } else if (step === 2) {
+      body = q('2 / 5', 'Ton business, c\'est quoi ?', 'Tu pourras changer plus tard.').concat([h('div', { key: 'c', style: { display: 'flex', flexDirection: 'column', gap: 8 } }, BIZ.map(function (b) { return chip(b, A.biz === b, function () { set({ biz: b, tasks: [] }); setTimeout(next, 220); }); }))]);
+      cta = null;
+    } else if (step === 3) {
+      body = q('3 / 5', 'Combien tu gagnes par mois en ce moment ?', 'Pour choisir ton premier Boss. Sois honnête, personne ne le voit.').concat([h('div', { key: 'c', style: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 } }, REV.map(function (r, i) { return chip(r[0], A.rev === i, function () { set({ rev: i }); }, 'r' + i); })),
+        A.rev >= 0 ? h('div', { key: 'b', style: { display: 'flex', alignItems: 'center', gap: 14, padding: 16, borderRadius: 20, background: C.strong, color: C.strongInk, animation: 'lifeos-sheet .3s cubic-bezier(.23,1,.32,1)' } }, h('span', { 'aria-hidden': 'true', style: { width: 52, height: 52, flex: 'none', borderRadius: '50%', background: 'radial-gradient(circle at 32% 28%, #b9bbc0 0 6%, #5d5f65 22%, #26272b 55%, #0d0e10 78%, #3a3b40 100%)' } }), h('span', { style: { display: 'flex', flexDirection: 'column', gap: 2 } }, h('span', { style: { fontSize: 12, fontWeight: 700, opacity: 0.7 } }, out('Ton premier Boss')), h('b', { style: { fontSize: 18, fontWeight: 800 } }, firstBoss[0]), h('span', { style: { fontSize: 12.5, fontWeight: 600, opacity: 0.7 } }, bossSub(firstBoss)))) : null]);
+      cta = primary('Continuer', next, A.rev < 0);
+    } else if (step === 4) {
+      var sug = sugFor(A.biz);
+      var add = function (t) { t = String(t || '').trim(); if (!t || A.tasks.length >= 3 || A.tasks.indexOf(t) >= 0) return; set({ tasks: A.tasks.concat([t]), task: '' }); };
+      body = q('4 / 5', 'Ta kill list d\'aujourd\'hui', '3 actions max qui font avancer ton business. Touche une idée ou écris la tienne.').concat([
+        h('div', { key: 'k', style: { display: 'flex', flexDirection: 'column', gap: 8 } }, A.tasks.map(function (t, i) { return h('div', { key: t, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 16, background: C.strong, color: C.strongInk } }, h('b', { style: { flex: 1, fontSize: 15 } }, t), h('button', { type: 'button', 'aria-label': out('Retirer'), onClick: function () { set({ tasks: A.tasks.filter(function (x, j) { return j !== i; }) }); }, style: { border: 0, background: 'transparent', color: 'inherit', opacity: 0.6, fontSize: 15, cursor: 'pointer', width: 32, height: 32 } }, '✕')); })),
+        A.tasks.length < 3 ? h('div', { key: 's', style: { display: 'flex', flexWrap: 'wrap', gap: 8 } }, sug.filter(function (x) { return A.tasks.indexOf(x) < 0; }).map(function (x) { return h('button', { key: x, type: 'button', className: 'lifeos-press', onClick: function () { add(x); }, style: { border: '1px dashed ' + C.line, borderRadius: 999, padding: '10px 14px', background: 'transparent', color: C.ink, font: 'inherit', fontSize: 14, fontWeight: 700, cursor: 'pointer' } }, '+ ' + x); })) : null,
+        A.tasks.length < 3 ? h('div', { key: 'i', style: { display: 'flex', gap: 8 } }, h('input', { type: 'text', value: A.task, maxLength: 80, placeholder: out('Ou écris ta tâche…'), 'aria-label': out('Nouvelle tâche'), onChange: function (e) { set({ task: e.target.value }); }, onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); add(A.task); } }, style: Object.assign({}, inp, { flex: 1, width: 'auto', minWidth: 0 }) }), h('button', { type: 'button', className: 'lifeos-press', 'aria-label': out('Ajouter'), onClick: function () { add(A.task); }, style: { width: 56, height: 56, flex: 'none', border: 0, borderRadius: 16, background: C.strong, color: C.strongInk, fontSize: 24, fontWeight: 800, cursor: 'pointer' } }, '+')) : null]);
+      cta = primary(A.tasks.length ? 'Continuer' : 'Plus tard', next);
+    } else if (step === 5) {
+      body = q('5 / 5', 'Ton check-in du soir, à quelle heure ?', '2 minutes pour faire le point et frapper ton Boss. Tu pourras ajouter un rappel à l\'étape suivante.').concat([h('div', { key: 'h', style: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 } }, [18, 19, 20, 21, 22, 23].map(function (x) { return chip(x + ' h', A.hour === x, function () { set({ hour: x }); }, 'h' + x); }))]);
+      cta = primary('Continuer', next);
+    } else {
+      body = q('C\'est prêt', (A.name.trim() || 'Toi') + ', ton jeu commence.', null).concat([
+        h('div', { key: 'b', style: { display: 'flex', flexDirection: 'column', gap: 14, padding: 20, borderRadius: 26, background: C.strong, color: C.strongInk } },
+          h('span', { style: { fontSize: 12, fontWeight: 800, opacity: 0.7 } }, out('Ton premier Boss')),
+          h('b', { style: { fontFamily: "'Urbanist', sans-serif", fontSize: 28, fontWeight: 700 } }, firstBoss[0]),
+          h('span', { style: { display: 'block', height: 12, borderRadius: 999, background: 'rgba(127,127,127,.3)', overflow: 'hidden' } }, h('i', { style: { display: 'block', height: '100%', width: '100%', background: C.strongInk, borderRadius: 999 } })),
+          h('span', { style: { fontSize: 13, fontWeight: 700, opacity: 0.75 } }, out('Récompense') + ' +' + Number(firstBoss[3]).toLocaleString('fr-FR') + ' XP')),
+        h('div', { key: 'rm', style: { display: 'flex', flexDirection: 'column', gap: 10, padding: 16, borderRadius: 20, background: C.card, border: '1px solid ' + C.line } },
+          h('b', { style: { fontSize: 15, fontWeight: 800 } }, '⏰ ' + out('Ne rate pas ton check-in de') + ' ' + A.hour + ' h'),
+          h('span', { style: { fontSize: 13, fontWeight: 600, color: C.mut, lineHeight: 1.4 } }, out('La plupart des gens lâchent une appli parce qu\'ils oublient de l\'ouvrir. Ajoute un rappel quotidien dans ton agenda, ça prend 10 secondes.')),
+          h('button', { type: 'button', className: 'lifeos-press', onClick: function () { window.LifeOS.reminder.add(A.hour); set({ rem: true }); }, style: Object.assign({}, btn, { minHeight: 48, fontSize: 14.5, background: A.rem ? C.soft : C.strong, color: A.rem ? C.ink : C.strongInk }) }, A.rem ? '✓ ' + out('Rappel ajouté (touche pour réessayer)') : '📅 ' + out('Ajouter le rappel à mon agenda'))),
+        h('div', { key: 'r', style: { display: 'flex', flexDirection: 'column', gap: 6, fontSize: 14, fontWeight: 700, color: C.mut } },
+          h('span', null, '🎯 ' + (A.tasks.length ? A.tasks.length + ' ' + out('tâche(s) dans ta kill list') : out('Kill list à remplir sur l\'Accueil'))),
+          h('span', null, '🎁 ' + out('Gratuit pendant la bêta')),
+          h('span', null, '💾 ' + out('Crée ton compte dans Paramètres pour sauvegarder')))]);
+      cta = primary('C\'est parti', finish);
+    }
+    var pct = Math.round(step / (N - 1) * 100);
+    return h('div', { style: { minHeight: '100vh', boxSizing: 'border-box', background: C.bg, color: C.ink, fontFamily: "'Manrope', system-ui, sans-serif", display: 'flex', justifyContent: 'center', padding: 'calc(18px + env(safe-area-inset-top)) 18px calc(24px + env(safe-area-inset-bottom))' } },
+      h('div', { style: { width: '100%', maxWidth: 480, display: 'flex', flexDirection: 'column', gap: 18, minHeight: 'calc(100vh - 60px)' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
+          step > 0 ? h('button', { type: 'button', onClick: back, 'aria-label': out('Retour'), className: 'lifeos-press', style: { width: 44, height: 44, flex: 'none', border: 0, borderRadius: '50%', background: C.card, color: C.ink, fontSize: 18, fontWeight: 800, cursor: 'pointer' } }, '←') : null,
+          h('div', { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct, style: { flex: 1, height: 8, borderRadius: 999, background: C.line, overflow: 'hidden' } }, h('i', { style: { display: 'block', height: '100%', width: pct + '%', background: C.strong, borderRadius: 999, transition: 'width 300ms cubic-bezier(0.23,1,0.32,1)' } }))),
+        h('div', { key: 'st' + step, style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 14, animation: 'lifeos-sheet .3s cubic-bezier(.23,1,.32,1)' } }, body),
+        cta ? h('div', { style: { display: 'flex', position: 'sticky', bottom: 0, padding: '12px 0', background: 'linear-gradient(to bottom, transparent, ' + C.bg + ' 30%)' } }, cta) : null));
+  }
+
   function App() {
     var sysTheme = function () { return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'sombre' : 'clair'; };
     var initialTheme = store.get('theme') || sysTheme();
     var bState = R.useState(0);
     bump = function () { userDirty = true; trCache = {}; bState[1](function (n) { return n + 1; }); };
+    var oState = R.useState(needsOnboarding());
     var sState = R.useState(SCREENS[store.get('screen')] ? store.get('screen') : 'Main');
     var tState = R.useState(initialTheme);
     var screen = sState[0], setScreen = sState[1], theme = tState[0], setTheme = tState[1];
@@ -1243,7 +1494,8 @@
       return function () { document.removeEventListener('click', onClick); document.removeEventListener('keydown', onKey); };
     }, []);
 
-    return h(R.Fragment, null, h('div', { key: screen, className: 'lifeos-page' }, h(Boundary, { theme: theme }, h(Screen, { name: screen, theme: theme, lang: SETTINGS.lang, rev: bState[0] }))), h(FocusPill, { screen: screen, theme: theme }), h(TabBar, { screen: screen, theme: theme }));
+    if (oState[0]) return h(Onboarding, { theme: theme, onDone: function () { store.set('screen', 'Main'); setScreen('Main'); oState[1](false); window.scrollTo(0, 0); } });
+    return h(R.Fragment, null, h('div', { key: screen, className: 'lifeos-page' }, h(Boundary, { theme: theme }, h(Screen, { name: screen, theme: theme, lang: SETTINGS.lang, rev: bState[0] }))), h(ShareSheet, null), h(FocusPill, { screen: screen, theme: theme }), h(TabBar, { screen: screen, theme: theme }));
   }
 
   document.body.setAttribute('data-theme', store.get('theme') || 'clair');
