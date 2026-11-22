@@ -145,6 +145,27 @@
   function clone(v) { return v == null ? v : JSON.parse(JSON.stringify(v)); }
   function isoDay(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
   function weekKey(d) { var x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return isoDay(x); }
+  /* Flamme qui pardonne : 1 joker par semaine (un soir raté ne casse pas la série) + mode pause (partiels…) */
+  function pausedOn(day) { var P = store.get('pauses') || []; for (var i = 0; i < P.length; i++) if (day >= P[i].from && day <= P[i].to) return true; return false; }
+  function flameAt(C, d) {
+    C = C || {}; var keys = Object.keys(C).filter(function (k) { return /^\d{4}-\d\d-\d\d$/.test(k) && C[k]; }).sort(), first = keys[0];
+    var res = { n: 0, jokerWeeks: {}, pausedDays: 0 };
+    if (!first) return res;
+    var x = new Date(d + 'T12:00:00');
+    for (var guard = 0; guard < 4000; guard++) {
+      var day = isoDay(x); if (day < first) break;
+      if (C[day]) res.n++;
+      else if (pausedOn(day)) res.pausedDays++;
+      else { var wk = weekKey(x); if (res.jokerWeeks[wk]) break; res.jokerWeeks[wk] = day; }
+      x.setDate(x.getDate() - 1);
+    }
+    return res;
+  }
+  function flameNow(C) {
+    C = C || store.get('shared:checkins') || {}; var now = new Date(), tdy = isoDay(now), y = new Date(now); y.setDate(y.getDate() - 1);
+    var r = flameAt(C, C[tdy] ? tdy : isoDay(y)), wk = weekKey(now), P = (store.get('pauses') || []).filter(function (p) { return p.to >= tdy; })[0];
+    return { n: r.n, jokerUsed: !!r.jokerWeeks[wk], jokerDay: r.jokerWeeks[wk] || null, paused: !!(P && P.from <= tdy), pause: P || null };
+  }
 
   /* Remise à zéro des anciennes données d'exemple (une seule fois) */
   var dv = store.get('dataVersion');
@@ -621,6 +642,7 @@
       },
       on: function (f) { listeners.push(f); return function () { var i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); }; },
       wipe: wipe,
+      rpc: function (name, args) { if (!sb) return Promise.reject(new Error('indisponible')); return sb.rpc(name, args || {}).then(function (r) { if (r.error) throw r.error; return r.data; }); },
       sendCode: function (email) { if (!sb) return Promise.reject(new Error('indisponible')); return sb.auth.signInWithOtp({ email: email, options: { shouldCreateUser: true, emailRedirectTo: /^https?:/.test(location.protocol) ? location.origin + location.pathname : undefined } }).then(function (r) { if (r.error) throw r.error; }); },
       verify: function (email, code) { return sb.auth.verifyOtp({ email: email, token: code, type: 'email' }).then(function (r) { if (r.error) throw r.error; user = r.data.user || (r.data.session && r.data.session.user); return pull(true); }); },
       keepRemote: function () { var c = st.conflict; if (c) apply(c.data, c.at); },
@@ -876,6 +898,52 @@
   window.LifeOS = {
     settings: SETTINGS,
     share: function (d) { try { window.dispatchEvent(new CustomEvent('lifeos-share', { detail: d || {} })); } catch (e) {} },
+    flame: {
+      now: function (C) { return flameNow(C); }, at: function (C, d) { return flameAt(C, d); },
+      pause: function (days) { var t = new Date(), e = new Date(); e.setDate(e.getDate() + Math.max(1, Math.min(21, Number(days) || 7)) - 1); var P = (store.get('pauses') || []).filter(function (p) { return p.to < isoDay(t); }); P.push({ from: isoDay(t), to: isoDay(e) }); store.set('pauses', P); },
+      resume: function () { var t = new Date(), y = new Date(); y.setDate(y.getDate() - 1); var tdy = isoDay(t); store.set('pauses', (store.get('pauses') || []).map(function (p) { return p.from <= tdy && p.to >= tdy ? { from: p.from, to: isoDay(y) } : p; }).filter(function (p) { return p.to >= p.from; })); }
+    },
+    /* Notifications du soir (Web Push) : la PWA s'abonne, Supabase envoie la notification à l'heure du check-in */
+    push: (function () {
+      function b64(s) { var p = '='.repeat((4 - s.length % 4) % 4), raw = atob((s + p).replace(/-/g, '+').replace(/_/g, '/')), out = new Uint8Array(raw.length); for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i); return out; }
+      function ios() { return /iPhone|iPad|iPod/i.test(navigator.userAgent || ''); }
+      function standalone() { try { return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true; } catch (e) { return false; } }
+      function supported() { return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && /^https:/.test(location.protocol); }
+      function state() {
+        if (!supported()) return ios() && !standalone() ? 'ios-home' : 'unsupported';
+        if (ios() && !standalone()) return 'ios-home';
+        if (Notification.permission === 'denied') return 'denied';
+        var P = store.get('push'); return P && P.on && Notification.permission === 'granted' ? 'on' : 'off';
+      }
+      function tz() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { return 'UTC'; } }
+      function enable(hour) {
+        hour = Math.max(0, Math.min(23, Number(hour) || (store.get('profile') || {}).ciHour || 21));
+        var C = window.LifeOS.cloud;
+        if (!supported()) return Promise.reject(new Error(state() === 'ios-home' ? 'Ajoute d\'abord l\'appli à ton écran d\'accueil (Partager → Sur l\'écran d\'accueil), puis ouvre-la depuis l\'icône.' : 'Ton navigateur ne gère pas les notifications. Utilise le rappel agenda.'));
+        var guard = new Promise(function (_, rej) { setTimeout(function () { rej(new Error('Le téléphone ne répond pas. Réessaie, ou utilise le rappel agenda.')); }, 20000); });
+        return Promise.race([guard, Notification.requestPermission().then(function (perm) {
+          if (perm !== 'granted') throw new Error('Notifications refusées. Tu peux les réactiver dans les réglages du téléphone.');
+          return Promise.all([navigator.serviceWorker.ready, C.rpc('lifeos_push_public_key')]);
+        }).then(function (r) {
+          var reg = r[0], key = r[1]; if (!key) throw new Error('Notifications pas encore prêtes côté serveur.');
+          return reg.pushManager.getSubscription().then(function (old) { return old || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64(key) }); });
+        }).then(function (sub) {
+          var j = sub.toJSON();
+          return C.rpc('lifeos_push_subscribe', { sub: j, hour: hour, tz: tz() }).then(function () { store.set('push', { on: true, hour: hour, at: isoDay(new Date()), endpoint: j.endpoint }); return true; });
+        })]).catch(function (e) { var m = (e && e.message) || ''; throw new Error(/Ajoute|Notifications|téléphone|navigateur/.test(m) ? m : 'Connexion au serveur impossible pour le moment. Réessaie plus tard, ou utilise le rappel agenda.'); });
+      }
+      function disable() {
+        var P = store.get('push') || {}; store.set('push', { on: false, hour: P.hour });
+        return navigator.serviceWorker.ready.then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (sub) {
+          if (!sub) return; var ep = sub.endpoint; return sub.unsubscribe().then(function () { return window.LifeOS.cloud.rpc('lifeos_push_unsubscribe', { endpoint_in: ep }).catch(function () {}); });
+        }).catch(function () {});
+      }
+      function test() {
+        var P = store.get('push') || {}; if (!P.endpoint) return Promise.reject(new Error('Active d\'abord les notifications.'));
+        return fetch('https://huipwdtnpdntwulqzjhc.supabase.co/functions/v1/lifeos-push?test=' + encodeURIComponent(P.endpoint), { method: 'POST' }).then(function (r) { return r.json(); }).then(function (j) { if (!j || !j.sent) throw new Error('Aucune notification envoyée. Désactive puis réactive les notifications.'); return true; }).catch(function (e) { var m = (e && e.message) || ''; throw new Error(/Active|Aucune/.test(m) ? m : 'Serveur de notifications pas encore prêt.'); });
+      }
+      return { supported: supported, state: state, enable: enable, disable: disable, test: test, get: function () { return store.get('push'); } };
+    })(),
     /* Rappel du soir sans serveur : un événement d'agenda qui se répète chaque jour (iPhone/PC : fichier .ics ; Android : Google Agenda) */
     reminder: (function () {
       function pad(n) { return ('0' + n).slice(-2); }
@@ -930,25 +998,48 @@
       ];
       var SPORT_XP = [0, 2000, 5000, 10000, 20000, 30000, 45000, 60000, 80000, 100000];
       function levelOf(total) { var L = 0, need = 1000, acc = 0; while (L < 100 && total >= acc + need) { acc += need; L++; need = (L + 1) * 1000; } return { level: L, into: total - acc, need: L >= 100 ? 0 : need, start: acc }; }
-      function bosses(revIn) {
+      /* Look de chaque Boss (trophée quand il est battu) : index -1 = Boss 0 */
+      var LOOK = [['🛡️', '#8a94a6'], ['💰', '#b08d3c'], ['🧱', '#a0563b'], ['⚔️', '#5b6b8c'], ['👑', '#c9a227'], ['🗿', '#6f7d6b'], ['🏛️', '#8c6fb0'], ['🐉', '#3f8f6b'], ['💀', '#b23a3a']];
+      function lookOf(i) { if (i < 0) return { emoji: '🚀', tint: '#4f7cc9' }; var L = LOOK[i] || ['🏆', '#8a94a6']; return { emoji: L[0], tint: L[1] }; }
+      /* Actions de la kill list par jour (3 max comptées par jour) */
+      function actionsByDay(mainIn) {
+        var MN = mainIn || store.get('state:Main') || {}, KL = Object.assign({}, MN.killLog || {}), tdy = isoDay(new Date());
+        var kT = (MN.prios || []).filter(function (p) { return p.done && (p.day || tdy) === tdy; }).length; KL[tdy] = Math.max(Number(KL[tdy]) || 0, kT);
+        var out = {}; Object.keys(KL).forEach(function (d) { var n = Math.min(3, Number(KL[d]) || 0); if (n > 0 && /^\d{4}-\d\d-\d\d$/.test(d)) out[d] = n; }); return out;
+      }
+      var ACT_PCT = 0.01, ACT_CAP = 0.15; /* chaque action = 1 % des PV du Boss, au maximum 15 % : le reste, c'est l'argent */
+      function bosses(revIn, mainIn) {
         var custom = store.get('bossList'), list = (custom && custom.length ? custom : BOSS.map(function (b) { return { name: b[0], target: b[1], kind: b[2], xp: b[3] }; }));
         var rev = (revIn || store.get('shared:revenus') || []).slice().sort(function (a, b) { return (a.d || '') < (b.d || '') ? -1 : 1; });
-        var total = 0, months = {}, killed = [];
-        list.forEach(function () { killed.push(null); });
-        rev.forEach(function (r) {
-          var m = Number(r.m) || 0, d = r.d || isoDay(new Date()), mk = d.slice(0, 7);
-          total += m; months[mk] = (months[mk] || 0) + m;
-          list.forEach(function (b, i) { if (!killed[i] && (b.kind === 'total' ? total : months[mk]) >= b.target) killed[i] = d; });
-        });
-        /* dans l'ordre : on ne bat pas le boss 4 avant le 3 */
         var start = Math.max(0, Math.min(list.length - 1, Number(store.get('bossStart')) || 0));
-        for (var s0 = 0; s0 < start; s0++) killed[s0] = 'avant';
-        for (var i = 1; i < list.length; i++) if (killed[i] && !killed[i - 1]) { for (var j = i; j < list.length; j++) killed[j] = null; break; }
-        var cur = killed.indexOf(null), mkNow = isoDay(new Date()).slice(0, 7), bestMonth = 0;
+        var killed = list.map(function (b, i) { return i < start ? 'avant' : null; });
+        var ACT = actionsByDay(mainIn), byDay = {}, tdy = isoDay(new Date());
+        rev.forEach(function (r) { var d = r.d || tdy; (byDay[d] = byDay[d] || []).push(Number(r.m) || 0); });
+        var days = Object.keys(byDay).concat(Object.keys(ACT)).filter(function (d, k, a) { return a.indexOf(d) === k; }).sort();
+        var firstRev = rev.length ? (rev[0].d || tdy) : null, launchOn = !!store.get('launch');
+        var total = 0, months = {}, cur = start, acts = 0, actsMonth = null, since = null;
+        days.forEach(function (d) {
+          var mk = d.slice(0, 7);
+          (byDay[d] || []).forEach(function (m) { total += m; months[mk] = (months[mk] || 0) + m; });
+          if (cur < list.length) {
+            var b0 = list[cur];
+            if (b0.kind !== 'total' && actsMonth !== mk) { acts = 0; actsMonth = mk; }
+            var countable = (since === null || d > since) && !(launchOn && (!firstRev || d < firstRev));
+            if (countable) acts += ACT[d] || 0;
+          }
+          while (cur < list.length) {
+            var b = list[cur], money = b.kind === 'total' ? total : (months[mk] || 0), dmg = Math.min(ACT_CAP * b.target, acts * ACT_PCT * b.target);
+            if (money + dmg >= b.target) { killed[cur] = d; cur++; acts = 0; since = d; actsMonth = mk; } else break;
+          }
+        });
+        var mkNow = tdy.slice(0, 7), bestMonth = 0;
         Object.keys(months).forEach(function (k) { bestMonth = Math.max(bestMonth, months[k]); });
-        var B = cur >= 0 ? list[cur] : null, have = B ? (B.kind === 'total' ? total : (months[mkNow] || 0)) : 0;
-        return { list: list.map(function (b, i) { return Object.assign({}, b, { i: i, killed: killed[i] }); }), cur: cur, boss: B, have: have, total: total, thisMonth: months[mkNow] || 0, bestMonth: bestMonth,
-          hp: B ? Math.max(0, B.target - have) : 0, hpPct: B ? Math.max(0, Math.round((B.target - Math.min(have, B.target)) / B.target * 100)) : 0 };
+        var B = cur < list.length ? list[cur] : null, have = B ? (B.kind === 'total' ? total : (months[mkNow] || 0)) : 0;
+        var actsNow = B ? (B.kind !== 'total' && actsMonth !== mkNow ? 0 : acts) : 0, actDmg = B ? Math.min(ACT_CAP * B.target, actsNow * ACT_PCT * B.target) : 0;
+        var left = B ? Math.max(0, B.target - have - actDmg) : 0;
+        return { list: list.map(function (b, i) { return Object.assign({}, b, { i: i, killed: killed[i], look: lookOf(i) }); }), cur: B ? cur : -1, boss: B, have: have, total: total, thisMonth: months[mkNow] || 0, bestMonth: bestMonth,
+          acts: actsNow, actDmg: actDmg, actCap: B ? ACT_CAP * B.target : 0, actFull: B ? actDmg >= ACT_CAP * B.target - 1e-9 : false, look: B ? lookOf(cur) : null,
+          hp: left, hpPct: B ? Math.max(0, Math.round(left / B.target * 100)) : 0 };
       }
       /* Boss 0 « Le Démarrage » : pour ceux qui n'ont pas encore gagné leur 1er euro. 4 étapes à cocher + la 1re vente. */
       var LAUNCH = {
@@ -976,7 +1067,7 @@
         L.done = L.done || {}; if (L.done[i]) delete L.done[i]; else L.done[i] = isoDay(new Date());
         store.set('launch', L);
       }
-      function streakAt(C, d) { var x = new Date(d + 'T12:00:00'), n = 0; while (C[isoDay(x)]) { n++; x.setDate(x.getDate() - 1); } return n; }
+      function streakAt(C, d) { return flameAt(C, d).n; }
       function summary() {
         var C = store.get('shared:checkins') || {}, H = store.get('shared:habits') || [], F = store.get('shared:focusLog') || {}, SP = store.get('state:Sport') || {}, OB = store.get('state:Objectifs') || {};
         var days = {};
@@ -1014,7 +1105,7 @@
           return { bot: true, user_id: 'bot' + i, pseudo: b[0], xp_total: total, xp_week: wk, level: levelOf(total).level, sport_rank: Math.min(6, 1 + (i % 5)), streak: 3 + (i * 5) % 40 };
         });
       }
-      return { summary: summary, bosses: bosses, launch: launch, toggleLaunch: toggleLaunch, bizKey: bizKey, levelOf: levelOf, fmt: fmt, rivals: rivals, BOSS: BOSS, SPORT_XP: SPORT_XP };
+      return { summary: summary, bosses: bosses, lookOf: lookOf, ACT_PCT: ACT_PCT, ACT_CAP: ACT_CAP, launch: launch, toggleLaunch: toggleLaunch, bizKey: bizKey, levelOf: levelOf, fmt: fmt, rivals: rivals, BOSS: BOSS, SPORT_XP: SPORT_XP };
     })(),
     /* Rangs du sport : 5 rangs à 3 niveaux, puis Champion et Légende, avec leur emblème */
     sport: (function () {
@@ -1066,9 +1157,9 @@
       streak: function (C, tdy) {
         C = C || {}; var d = new Date(tdy + 'T12:00:00');
         if (!C[tdy]) d.setDate(d.getDate() - 1);
-        var n = 0; while (C[isoDay(d)]) { n++; d.setDate(d.getDate() - 1); }
-        return n;
-      }
+        return flameAt(C, isoDay(d)).n;
+      },
+      streakBefore: function (C, tdy) { var d = new Date(tdy + 'T12:00:00'); d.setDate(d.getDate() - 1); return flameAt(C || {}, isoDay(d)).n; }
     },
     rate: rate,
     toDisp: function (eur) { return SETTINGS.currency === 'Rs' ? Math.round(Number(eur || 0) * rate()) : Number(eur || 0); },
@@ -1352,6 +1443,7 @@
       'Pas': ['Choisir mon idée de business', 'Parler à 3 clients potentiels', 'Lister ce que je sais vendre']
     };
     var sugFor = function (b) { b = String(b || ''); var k = Object.keys(SUG).filter(function (x) { return b.indexOf(x) === 0; })[0]; return SUG[k || 'Autre']; };
+    var pushSt = window.LifeOS && window.LifeOS.push ? window.LifeOS.push.state() : 'unsupported';
     var start = A.rev >= 0 ? REV[A.rev][1] : 0, isLaunch = A.rev === 0 || A.biz === 'Pas encore lancé';
     var firstBoss = isLaunch ? ['Le Démarrage', 5, 'launch', 5000] : (BOSS[start] || BOSS[0] || ['Le Gardien des 100 €', 100, 'total', 10000]);
     var bossSub = function (b) { return b[2] === 'launch' ? out('Boss 0 · 5 étapes pour lancer ton business') : b[2] === 'total' ? b[1] + ' € gagnés au total' : b[1].toLocaleString('fr-FR') + ' € en un mois'; };
@@ -1413,8 +1505,11 @@
           h('span', { style: { fontSize: 13, fontWeight: 700, opacity: 0.75 } }, out('Récompense') + ' +' + Number(firstBoss[3]).toLocaleString('fr-FR') + ' XP')),
         h('div', { key: 'rm', style: { display: 'flex', flexDirection: 'column', gap: 10, padding: 16, borderRadius: 20, background: C.card, border: '1px solid ' + C.line } },
           h('b', { style: { fontSize: 15, fontWeight: 800 } }, '⏰ ' + out('Ne rate pas ton check-in de') + ' ' + A.hour + ' h'),
-          h('span', { style: { fontSize: 13, fontWeight: 600, color: C.mut, lineHeight: 1.4 } }, out('La plupart des gens lâchent une appli parce qu\'ils oublient de l\'ouvrir. Ajoute un rappel quotidien dans ton agenda, ça prend 10 secondes.')),
-          h('button', { type: 'button', className: 'lifeos-press', onClick: function () { window.LifeOS.reminder.add(A.hour); set({ rem: true }); }, style: Object.assign({}, btn, { minHeight: 48, fontSize: 14.5, background: A.rem ? C.soft : C.strong, color: A.rem ? C.ink : C.strongInk }) }, A.rem ? '✓ ' + out('Rappel ajouté (touche pour réessayer)') : '📅 ' + out('Ajouter le rappel à mon agenda'))),
+          h('span', { style: { fontSize: 13, fontWeight: 600, color: C.mut, lineHeight: 1.4 } }, out(pushSt === 'off' ? 'La plupart des gens lâchent une appli parce qu\'ils oublient de l\'ouvrir. Active les notifications : un petit message chaque soir à l\'heure de ton check-in.' : 'La plupart des gens lâchent une appli parce qu\'ils oublient de l\'ouvrir. Ajoute un rappel quotidien dans ton agenda, ça prend 10 secondes.')),
+          pushSt === 'off' ? h('button', { type: 'button', className: 'lifeos-press', disabled: A.pushBusy, onClick: function () { set({ pushBusy: true, pushErr: '' }); window.LifeOS.push.enable(A.hour).then(function () { set({ pushBusy: false, pushOk: true }); }, function (e) { set({ pushBusy: false, pushErr: (e && e.message) || 'Impossible d\'activer.' }); }); }, style: Object.assign({}, btn, { minHeight: 48, fontSize: 14.5, background: A.pushOk ? C.soft : C.strong, color: A.pushOk ? C.ink : C.strongInk }) }, A.pushOk ? '✓ ' + out('Notifications activées') : A.pushBusy ? out('Activation…') : '🔔 ' + out('Activer les notifications')) : null,
+          A.pushErr ? h('span', { style: { fontSize: 12.5, fontWeight: 700, color: '#c0392b', lineHeight: 1.4 } }, A.pushErr) : null,
+          (pushSt !== 'off' || A.pushErr) ? h('button', { type: 'button', className: 'lifeos-press', onClick: function () { window.LifeOS.reminder.add(A.hour); set({ rem: true }); }, style: Object.assign({}, btn, { minHeight: 48, fontSize: 14.5, background: A.rem ? C.soft : (pushSt === 'off' ? C.soft : C.strong), color: A.rem || pushSt === 'off' ? C.ink : C.strongInk }) }, A.rem ? '✓ ' + out('Rappel ajouté (touche pour réessayer)') : '📅 ' + out('Ajouter le rappel à mon agenda')) : null,
+          pushSt === 'ios-home' ? h('span', { style: { fontSize: 12, fontWeight: 600, color: C.mut, lineHeight: 1.4 } }, out('💡 Pour recevoir de vraies notifications sur iPhone : Partager → « Sur l\'écran d\'accueil », puis ouvre l\'appli depuis l\'icône et active-les dans Paramètres.')) : null),
         h('div', { key: 'r', style: { display: 'flex', flexDirection: 'column', gap: 6, fontSize: 14, fontWeight: 700, color: C.mut } },
           h('span', null, '🎯 ' + (A.tasks.length ? A.tasks.length + ' ' + out('tâche(s) dans ta kill list') : out('Kill list à remplir sur l\'Accueil'))),
           h('span', null, '🎁 ' + out('Gratuit pendant la bêta')),
@@ -1437,7 +1532,7 @@
     var bState = R.useState(0);
     bump = function () { userDirty = true; trCache = {}; bState[1](function (n) { return n + 1; }); };
     var oState = R.useState(needsOnboarding());
-    var sState = R.useState(SCREENS[store.get('screen')] ? store.get('screen') : 'Main');
+    var sState = R.useState(/[?&]ci=1/.test(location.search) && SCREENS.CheckIn ? 'CheckIn' : SCREENS[store.get('screen')] ? store.get('screen') : 'Main');
     var tState = R.useState(initialTheme);
     var screen = sState[0], setScreen = sState[1], theme = tState[0], setTheme = tState[1];
 
