@@ -898,6 +898,27 @@
   window.LifeOS = {
     settings: SETTINGS,
     share: function (d) { try { window.dispatchEvent(new CustomEvent('lifeos-share', { detail: d || {} })); } catch (e) {} },
+    plan: function () { return planInfo(); },
+    codes: {
+      redeem: function (raw) {
+        var code = String(raw || '').trim().toUpperCase().replace(/\s+/g, '');
+        if (code.length < 3) return Promise.reject(new Error('Entre ton code.'));
+        var dev = store.get('deviceId'); if (!dev) { dev = 'd-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10); store.set('deviceId', dev); }
+        var C = window.LifeOS.cloud; if (!C || !C.rpc) return Promise.reject(new Error('Connexion impossible pour le moment.'));
+        return C.rpc('lifeos_redeem_code', { code_in: code, device_in: dev }).catch(function () { throw new Error('Connexion impossible pour le moment. Réessaie plus tard.'); }).then(function (r) {
+          if (!r || !r.ok) throw new Error((r && r.error) || 'Code refusé.');
+          var used = store.get('codesUsed') || []; used.push({ code: r.code, kind: r.kind, value: r.value, at: isoDay(new Date()) }); store.set('codesUsed', used);
+          if (r.kind === 'premium_days') {
+            var tdy = isoDay(new Date()), cur = store.get('premiumUntil'), from = new Date((cur && cur >= tdy ? cur : tdy) + 'T12:00:00');
+            from.setDate(from.getDate() + Number(r.value) - (cur && cur >= tdy ? 0 : 1)); store.set('premiumUntil', isoDay(from));
+            return { kind: r.kind, value: r.value, until: isoDay(from), msg: '🎉 ' + (r.value >= 365 ? Math.round(r.value / 365) + ' an' + (r.value >= 730 ? 's' : '') : r.value >= 28 && r.value % 30 === 0 ? (r.value / 30) + ' mois' : r.value + ' jours') + ' de Premium offert' + (r.value >= 365 && r.value < 730 ? '' : '') + ', jusqu\'au ' + isoDay(from).split('-').reverse().join('/') + ' !' };
+          }
+          store.set('discount', { pct: r.value, code: r.code, at: isoDay(new Date()) });
+          return { kind: r.kind, value: r.value, msg: '🎉 Code ' + r.code + ' : -' + r.value + ' % sur le Premium. La réduction sera appliquée au paiement.' };
+        });
+      }
+    },
+    showPaywall: function () { try { window.dispatchEvent(new CustomEvent('lifeos-paywall')); } catch (e) {} },
     flame: {
       now: function (C) { return flameNow(C); }, at: function (C, d) { return flameAt(C, d); },
       pause: function (days) { var t = new Date(), e = new Date(); e.setDate(e.getDate() + Math.max(1, Math.min(21, Number(days) || 7)) - 1); var P = (store.get('pauses') || []).filter(function (p) { return p.to < isoDay(t); }); P.push({ from: isoDay(t), to: isoDay(e) }); store.set('pauses', P); },
@@ -1521,9 +1542,88 @@
       h('div', { style: { width: '100%', maxWidth: 480, display: 'flex', flexDirection: 'column', gap: 18, minHeight: 'calc(100vh - 60px)' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
           step > 0 ? h('button', { type: 'button', onClick: back, 'aria-label': out('Retour'), className: 'lifeos-press', style: { width: 44, height: 44, flex: 'none', border: 0, borderRadius: '50%', background: C.card, color: C.ink, fontSize: 18, fontWeight: 800, cursor: 'pointer' } }, '←') : null,
-          h('div', { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct, style: { flex: 1, height: 8, borderRadius: 999, background: C.line, overflow: 'hidden' } }, h('i', { style: { display: 'block', height: '100%', width: pct + '%', background: C.strong, borderRadius: 999, transition: 'width 300ms cubic-bezier(0.23,1,0.32,1)' } }))),
+          h('div', { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct, style: { flex: 1, height: 8, borderRadius: 999, background: C.line, overflow: 'hidden' } }, h('i', { style: { display: 'block', height: '100%', width: pct + '%', background: C.strong, borderRadius: 999, transition: 'width 300ms cubic-bezier(0.23,1,0.32,1)' } })),
+          themeBtn(C, dark)),
         h('div', { key: 'st' + step, style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 14, animation: 'lifeos-sheet .3s cubic-bezier(.23,1,.32,1)' } }, body),
         cta ? h('div', { style: { display: 'flex', position: 'sticky', bottom: 0, padding: '12px 0', background: 'linear-gradient(to bottom, transparent, ' + C.bg + ' 30%)' } }, cta) : null));
+  }
+
+  /* Bouton jour / nuit (onboarding et écran Premium) */
+  function themeBtn(C, dark) {
+    var sun = h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', 'aria-hidden': 'true' }, h('circle', { cx: 12, cy: 12, r: 4 }), h('path', { d: 'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4' }));
+    var moon = h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' }, h('path', { d: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z' }));
+    return h('button', { type: 'button', className: 'lifeos-press', 'aria-label': dark ? out('Passer en clair') : out('Passer en sombre'), title: dark ? out('Passer en clair') : out('Passer en sombre'),
+      onClick: function () { if (window.__lifeosSetTheme) window.__lifeosSetTheme(dark ? 'clair' : 'sombre'); },
+      style: { width: 44, height: 44, flex: 'none', border: 0, borderRadius: '50%', background: C.card, color: C.ink, display: 'grid', placeItems: 'center', cursor: 'pointer' } }, dark ? sun : moon);
+  }
+  /* Offre Premium : essai de 7 jours. PAYWALL_ACTIVE reste false tant que le paiement n'est pas ouvert (rien n'est bloqué). */
+  var PAYWALL_ACTIVE = false;
+  function planInfo() {
+    var PU = store.get('premiumUntil'), tdy = isoDay(new Date()), gift = PU && PU >= tdy ? PU : null, DC = store.get('discount') || null;
+    var base = planBase(); base.giftUntil = gift; base.premium = !!gift || (base.has && !base.ended); base.discount = DC; if (gift) base.locked = false; return base;
+  }
+  function planBase() {
+    var T = store.get('trial'); if (!T || !T.start) return { has: false, canTrial: true, choice: T && T.choice, active: PAYWALL_ACTIVE };
+    var d0 = new Date(T.start + 'T12:00:00'), day = Math.floor((Date.now() - d0.getTime()) / 864e5) + 1;
+    return { has: true, canTrial: false, start: T.start, choice: T.choice, day: day, daysLeft: Math.max(0, 7 - day + 1), ended: day > 7, active: PAYWALL_ACTIVE, locked: PAYWALL_ACTIVE && day > 7 && T.plan !== 'premium' };
+  }
+  function Paywall(p) {
+    var y1 = R.useState(false), yearly = y1[0], setYearly = y1[1];
+    var dark = p.theme === 'sombre';
+    var C = dark ? { bg: '#0b0b0c', card: '#151517', ink: '#f2f2f3', mut: '#8e9096', soft: 'rgba(255,255,255,.07)', strong: '#f2f2f3', strongInk: '#0b0b0c', inv: '#f2f2f3', invInk: '#0b0b0c' }
+                 : { bg: '#edeef0', card: '#ffffff', ink: '#0d0e10', mut: '#5c6067', soft: '#f3f4f6', strong: '#0d0e10', strongInk: '#ffffff', inv: '#0d0e10', invInk: '#f4f4f5' };
+    var D = "'Urbanist', 'Manrope', system-ui, sans-serif";
+    function go(choice) {
+      var T = store.get('trial') || {};
+      if (choice === 'trial' && !T.start) store.set('trial', { start: isoDay(new Date()), choice: 'trial' });
+      else if (!T.start) store.set('trial', { choice: choice === 'gift' ? 'gift' : 'free' });
+      store.set('paywallSeen', true); p.onDone();
+    }
+    var used = !!(store.get('trial') || {}).start;
+    var c1 = R.useState(false), codeOpen = c1[0], setCodeOpen = c1[1];
+    var c2 = R.useState(''), codeIn = c2[0], setCodeIn = c2[1];
+    var c3 = R.useState(null), codeRes = c3[0], setCodeRes = c3[1];
+    var c4 = R.useState(false), codeBusy = c4[0], setCodeBusy = c4[1];
+    var PLn = planInfo(), pct = PLn.discount ? Number(PLn.discount.pct) || 0 : 0;
+    var basePrice = yearly ? 49 : 5, netPrice = Math.round(basePrice * (100 - pct)) / 100;
+    var euro = function (v) { return (v % 1 ? v.toFixed(2).replace('.', ',') : String(v)) + ' €'; };
+    function redeem() { if (codeBusy) return; setCodeBusy(true); setCodeRes(null); window.LifeOS.codes.redeem(codeIn).then(function (r) { setCodeBusy(false); setCodeRes({ ok: true, msg: r.msg }); setCodeIn(''); }, function (e) { setCodeBusy(false); setCodeRes({ ok: false, msg: '❌ ' + ((e && e.message) || 'Code refusé.') }); }); }
+    var seg = function (on, label, click) { return h('button', { type: 'button', className: 'lifeos-press', 'aria-pressed': on ? 'true' : 'false', onClick: click, style: { border: 0, borderRadius: 999, padding: '7px 14px', minHeight: 34, font: 'inherit', fontSize: 12.5, fontWeight: on ? 800 : 700, cursor: 'pointer', background: on ? C.invInk : 'transparent', color: on ? C.inv : C.invInk, opacity: on ? 1 : 0.7 } }, out(label)); };
+    var feats = ['Les 9 Boss d\'argent', 'Joker et mode pause', 'Notifications du soir', 'Planning, Focus, Sport', 'Classement et trophées', 'Succès et coffres', 'Stats business', 'Boss en équipe'];
+    var steps = [['J1', 'Aujourd\'hui', 'Tout est débloqué', true], ['J5', 'Rappel', 'On te prévient avant la fin', false], ['J7', 'Tu choisis', 'Premium, ou gratuit : Boss 0 et check-in', false]];
+    return h('div', { style: { minHeight: '100vh', boxSizing: 'border-box', background: C.bg, color: C.ink, fontFamily: "'Manrope', system-ui, sans-serif", display: 'flex', justifyContent: 'center', padding: 'calc(18px + env(safe-area-inset-top)) 18px calc(24px + env(safe-area-inset-bottom))' } },
+      h('div', { style: { width: '100%', maxWidth: 480, display: 'flex', flexDirection: 'column', gap: 16, minHeight: 'calc(100vh - 60px)', animation: 'lifeos-sheet .3s cubic-bezier(.23,1,.32,1)' } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 } },
+          h('span', { style: { fontSize: 12, fontWeight: 800, letterSpacing: '.08em', textTransform: 'uppercase', color: C.mut } }, out('Dernière étape')),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } }, h('span', { style: { fontSize: 12, fontWeight: 800, padding: '6px 12px', borderRadius: 999, background: C.card } }, out('Bêta · sans carte')), themeBtn(C, dark))),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          h('h1', { style: { margin: 0, fontFamily: D, fontSize: 34, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.08 } }, out('Essaie Premium'), h('br'), out('7 jours gratuits')),
+          h('p', { style: { margin: 0, fontSize: 14, fontWeight: 600, color: C.mut, lineHeight: 1.45 } }, PLn.giftUntil ? out('🎉 Ton Premium est offert jusqu\'au') + ' ' + PLn.giftUntil.split('-').reverse().join('/') + '.' : out('Tout est débloqué. Ensuite') + ' ' + euro(netPrice) + ' ' + (yearly ? out('par an') : out('par mois')) + ', ' + out('annulable quand tu veux.'))),
+        h('section', { 'aria-label': 'Premium', style: { borderRadius: 30, padding: 20, display: 'flex', flexDirection: 'column', gap: 12, background: C.inv, color: C.invInk } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 } },
+            h('span', { style: { fontSize: 12, fontWeight: 800, padding: '6px 12px', borderRadius: 999, background: 'rgba(127,127,127,.25)' } }, 'Premium'),
+            h('div', { role: 'group', 'aria-label': out('Facturation'), style: { display: 'inline-flex', padding: 3, borderRadius: 999, background: 'rgba(127,127,127,.22)' } }, seg(!yearly, 'Mois', function () { setYearly(false); }), seg(yearly, 'Année', function () { setYearly(true); }))),
+          h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 5 } },
+            pct ? h('span', { style: { fontFamily: D, fontSize: 22, fontWeight: 600, opacity: 0.55, textDecoration: 'line-through', marginRight: 4 } }, euro(basePrice)) : null,
+            h('span', { style: { fontFamily: D, fontSize: 44, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1 } }, euro(netPrice)),
+            h('span', { style: { fontFamily: D, fontSize: 20, fontWeight: 600, opacity: 0.7 } }, yearly ? out('/an') : out('/mois'))),
+          h('span', { style: { fontSize: 12.5, fontWeight: 700, opacity: 0.7 } }, pct ? '🎟️ ' + out('Code') + ' ' + PLn.discount.code + ' : -' + pct + ' % ' + out('(appliqué au paiement)') : yearly ? out('Soit 4,08 € par mois · 2 mois offerts') : out('Passe à l\'année : 2 mois offerts')),
+          h('ul', { style: { listStyle: 'none', margin: 0, padding: 0, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '10px 12px' } },
+            feats.map(function (f) { return h('li', { key: f, style: { display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12.5, fontWeight: 700, lineHeight: 1.35 } }, h('span', { 'aria-hidden': 'true', style: { flex: 'none', width: 18, height: 18, borderRadius: 6, display: 'grid', placeItems: 'center', fontSize: 11, fontWeight: 900, background: C.invInk, color: C.inv } }, '✓'), out(f)); }))),
+        h('section', { 'aria-label': out('Comment marche l\'essai'), style: { borderRadius: 26, padding: 16, display: 'flex', flexDirection: 'column', gap: 12, background: C.card } },
+          steps.map(function (s) { return h('div', { key: s[0], style: { display: 'flex', gap: 12, alignItems: 'center' } },
+            h('span', { 'aria-hidden': 'true', style: { flex: 'none', width: 34, height: 34, borderRadius: 12, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, background: s[3] ? C.strong : C.soft, color: s[3] ? C.strongInk : C.ink } }, s[0]),
+            h('span', { style: { display: 'flex', flexDirection: 'column', gap: 1 } }, h('b', { style: { fontSize: 14, fontWeight: 800 } }, out(s[1])), h('span', { style: { fontSize: 12.5, fontWeight: 600, color: C.mut } }, out(s[2])))); })),
+        h('div', { style: { marginTop: 'auto', display: 'flex', flexDirection: 'column', position: 'sticky', bottom: 0, paddingTop: 12, paddingBottom: 4, background: 'linear-gradient(to bottom, transparent, ' + C.bg + ' 30%)' } },
+          h('button', { type: 'button', className: 'lifeos-press', onClick: function () { go(planInfo().giftUntil ? 'gift' : 'trial'); }, style: { minHeight: 56, border: 0, borderRadius: 999, background: C.strong, color: C.strongInk, font: 'inherit', fontSize: 16, fontWeight: 800, cursor: 'pointer' } }, PLn.giftUntil ? out('C\'est parti avec Premium') : used ? out('Mon essai Premium est déjà utilisé') : out('Commencer mes 7 jours gratuits'))),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          codeOpen ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            h('div', { style: { display: 'flex', gap: 8 } },
+              h('input', { type: 'text', value: codeIn, maxLength: 40, placeholder: out('Ex. POTES30'), 'aria-label': out('Ton code'), autoComplete: 'off', onChange: function (e) { setCodeIn(String(e.target.value || '').toUpperCase()); setCodeRes(null); }, onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); redeem(); } }, style: { flex: 1, minWidth: 0, boxSizing: 'border-box', border: 0, background: C.card, color: C.ink, borderRadius: 999, padding: '12px 18px', font: 'inherit', fontSize: 16, fontWeight: 700, letterSpacing: '.04em', minHeight: 48 } }),
+              h('button', { type: 'button', className: 'lifeos-press', onClick: redeem, style: { border: 0, borderRadius: 999, padding: '0 18px', minHeight: 48, background: C.card, color: C.ink, font: 'inherit', fontSize: 14, fontWeight: 800, cursor: 'pointer' } }, codeBusy ? '…' : out('Valider'))),
+            codeRes ? h('span', { style: { fontSize: 12.5, fontWeight: 800, textAlign: 'center', color: codeRes.ok ? (dark ? '#5fae7b' : '#1f8a4c') : (dark ? '#ff8a8a' : '#b42318') } }, codeRes.msg) : null)
+          : h('button', { type: 'button', onClick: function () { setCodeOpen(true); }, style: { border: 0, background: 'transparent', color: C.ink, font: 'inherit', fontSize: 13, fontWeight: 800, padding: 6, cursor: 'pointer', minHeight: 36 } }, '🎟️ ' + out('J\'ai un code')),
+          h('button', { type: 'button', onClick: function () { go('free'); }, style: { border: 0, background: 'transparent', color: C.mut, font: 'inherit', fontSize: 13, fontWeight: 700, padding: 8, cursor: 'pointer', minHeight: 40 } }, PLn.giftUntil ? out('Continuer') : out('Continuer avec la version gratuite')))));
   }
 
   function App() {
@@ -1532,6 +1632,8 @@
     var bState = R.useState(0);
     bump = function () { userDirty = true; trCache = {}; bState[1](function (n) { return n + 1; }); };
     var oState = R.useState(needsOnboarding());
+    var pwState = R.useState(false);
+    R.useEffect(function () { var on = function () { pwState[1](true); window.scrollTo(0, 0); }; window.addEventListener('lifeos-paywall', on); return function () { window.removeEventListener('lifeos-paywall', on); }; }, []);
     var sState = R.useState(/[?&]ci=1/.test(location.search) && SCREENS.CheckIn ? 'CheckIn' : SCREENS[store.get('screen')] ? store.get('screen') : 'Main');
     var tState = R.useState(initialTheme);
     var screen = sState[0], setScreen = sState[1], theme = tState[0], setTheme = tState[1];
@@ -1589,7 +1691,8 @@
       return function () { document.removeEventListener('click', onClick); document.removeEventListener('keydown', onKey); };
     }, []);
 
-    if (oState[0]) return h(Onboarding, { theme: theme, onDone: function () { store.set('screen', 'Main'); setScreen('Main'); oState[1](false); window.scrollTo(0, 0); } });
+    if (oState[0]) return h(Onboarding, { theme: theme, onDone: function () { store.set('screen', 'Main'); setScreen('Main'); oState[1](false); if (!store.get('paywallSeen')) pwState[1](true); window.scrollTo(0, 0); } });
+    if (pwState[0]) return h(Paywall, { theme: theme, onDone: function () { pwState[1](false); window.scrollTo(0, 0); } });
     return h(R.Fragment, null, h('div', { key: screen, className: 'lifeos-page' }, h(Boundary, { theme: theme }, h(Screen, { name: screen, theme: theme, lang: SETTINGS.lang, rev: bState[0] }))), h(ShareSheet, null), h(FocusPill, { screen: screen, theme: theme }), h(TabBar, { screen: screen, theme: theme }));
   }
 
